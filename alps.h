@@ -256,6 +256,9 @@ struct alps_fields {
 };
 #endif
 
+/* FreeBSD compat */
+struct psm_softc;
+
 /**
  * struct alps_data - private data structure for the ALPS driver
  * @psmouse: Pointer to parent psmouse device
@@ -314,8 +317,8 @@ typedef struct alps_data {
 	unsigned int x_res;
 	unsigned int y_res;
 
+	int (*hw_init)(struct psm_softc *psmouse);
 #if 0
-	int (*hw_init)(struct psmouse *psmouse);
 	void (*process_packet)(struct psmouse *psmouse);
 	int (*decode_fields)(struct alps_fields *f, unsigned char *p,
 			      struct psmouse *psmouse);

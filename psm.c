@@ -9976,9 +9976,8 @@ static int alps_command_mode_read_reg(struct psm_softc *psmouse, int addr)
 		return -1;
 	return __alps_command_mode_read_reg(psmouse, addr);
 }
-#if 0
 
-static int __alps_command_mode_write_reg(struct psmouse *psmouse, u8 value)
+static int __alps_command_mode_write_reg(struct psm_softc *psmouse, u8 value)
 {
 	if (alps_command_mode_send_nibble(psmouse, (value >> 4) & 0xf))
 		return -1;
@@ -9987,7 +9986,7 @@ static int __alps_command_mode_write_reg(struct psmouse *psmouse, u8 value)
 	return 0;
 }
 
-static int alps_command_mode_write_reg(struct psmouse *psmouse, int addr,
+static int alps_command_mode_write_reg(struct psm_softc *psmouse, int addr,
 				       u8 value)
 {
 	if (alps_command_mode_set_addr(psmouse, addr))
@@ -9995,7 +9994,6 @@ static int alps_command_mode_write_reg(struct psmouse *psmouse, int addr,
 	return __alps_command_mode_write_reg(psmouse, value);
 }
 
-#endif
 static int alps_rpt_cmd(struct psm_softc *psmouse, int init_command,
 			int repeated_command, unsigned char *param)
 {
@@ -10279,22 +10277,25 @@ static int alps_hw_init_v1_v2(struct psmouse *psmouse)
 
 	return 0;
 }
+#endif
 
 /* Must be in passthrough mode when calling this function */
-static int alps_trackstick_enter_extended_mode_v3_v6(struct psmouse *psmouse)
+static int alps_trackstick_enter_extended_mode_v3_v6(struct psm_softc *psmouse)
 {
 	unsigned char param[2] = {0xC8, 0x14};
+	KBDC ps2dev = psmouse->kbdc;
 
-	if (ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(&psmouse->ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(&psmouse->ps2dev, &param[0], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(&psmouse->ps2dev, &param[1], PSMOUSE_CMD_SETRATE))
+	if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE) ||
+	    ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE))
 		return -1;
 
 	return 0;
 }
 
+#if 0
 static int alps_hw_init_v6(struct psmouse *psmouse)
 {
 	int ret;
@@ -10318,11 +10319,12 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
 
 	return 0;
 }
+#endif
 
 /*
  * Enable or disable passthrough mode to the trackstick.
  */
-static int alps_passthrough_mode_v3(struct psmouse *psmouse,
+static int alps_passthrough_mode_v3(struct psm_softc *psmouse,
 				    int reg_base, bool enable)
 {
 	int reg_val, ret = -1;
@@ -10348,7 +10350,7 @@ error:
 }
 
 /* Must be in command mode when calling this function */
-static int alps_absolute_mode_v3(struct psmouse *psmouse)
+static int alps_absolute_mode_v3(struct psm_softc *psmouse)
 {
 	int reg_val;
 
@@ -10362,7 +10364,6 @@ static int alps_absolute_mode_v3(struct psmouse *psmouse)
 
 	return 0;
 }
-#endif
 
 static int alps_probe_trackstick_v3_v7(struct psm_softc *psmouse, int reg_base)
 {
@@ -10383,8 +10384,7 @@ error:
 	return ret;
 }
 
-#if 0
-static int alps_setup_trackstick_v3(struct psmouse *psmouse, int reg_base)
+static int alps_setup_trackstick_v3(struct psm_softc *psmouse, int reg_base)
 {
 	int ret = 0;
 	int reg_val;
@@ -10414,7 +10414,7 @@ static int alps_setup_trackstick_v3(struct psmouse *psmouse, int reg_base)
 		psmouse_warn(psmouse, "Failed to initialize trackstick (E7 report failed)\n");
 		ret = -ENODEV;
 	} else {
-		psmouse_dbg(psmouse, "trackstick E7 report: %3ph\n", param);
+		psmouse_dbg(psmouse, "trackstick E7 report: %02x %02x %02x\n", param[0], param[1], param[2]);
 		if (alps_trackstick_enter_extended_mode_v3_v6(psmouse)) {
 			psmouse_err(psmouse, "Failed to enter into trackstick extended mode\n");
 			ret = -EIO;
@@ -10449,10 +10449,10 @@ static int alps_setup_trackstick_v3(struct psmouse *psmouse, int reg_base)
 	return ret;
 }
 
-static int alps_hw_init_v3(struct psmouse *psmouse)
+static int alps_hw_init_v3(struct psm_softc *psmouse)
 {
-	struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	struct alps_data *priv = &psmouse->alps_data;
+	KBDC ps2dev = psmouse->kbdc;
 	int reg_val;
 	unsigned char param[4];
 
@@ -10520,6 +10520,7 @@ error:
 	return -1;
 }
 
+#if 0
 static int alps_get_v3_v7_resolution(struct psmouse *psmouse, int reg_pitch)
 {
 	int reg, x_pitch, y_pitch, x_electrode, y_electrode, x_phys, y_phys;
@@ -10987,8 +10988,8 @@ static int alps_set_protocol(struct psm_softc *psmouse,
 		break;
 #endif
 	case ALPS_PROTO_V3:
-#if 0
 		priv->hw_init = alps_hw_init_v3;
+#if 0
 		priv->process_packet = alps_process_packet_v3;
 		priv->set_abs_params = alps_set_abs_params_semi_mt;
 		priv->decode_fields = alps_decode_pinnacle;
@@ -11504,6 +11505,10 @@ enable_alps(struct psm_softc *sc, enum probearg arg)
 			 PS2_MOUSE_ALPS_DP_NAME : PS2_MOUSE_ALPS_NAME,
 		PS2_MOUSE_VENDOR, PS2_MOUSE_ALPS_PRODUCT,
 		priv->proto_version));
+
+	error = priv->hw_init(sc);
+	if (error)
+		return (FALSE);
 
 	return (FALSE);
 }
