@@ -1,4 +1,12 @@
 /*-
+ * SPDX-License-Identifier: BSD-1-Clause AND GPL-2.0-only
+ *
+ * This file combines original FreeBSD code (BSD, see notice below)
+ * with code derived from the Linux ALPS touchpad driver (GPL-2.0-only,
+ * see notice preceding the ALPS section). As a single linked whole,
+ * this file is distributed under GPL-2.0-only.
+ */
+/*
  * Copyright (c) 1992, 1993 Erik Forsberg.
  * Copyright (c) 1996, 1997 Kazutaka YOKOTA.
  * All rights reserved.
