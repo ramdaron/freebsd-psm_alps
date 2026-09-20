@@ -596,6 +596,7 @@ static int synaptics_support = 1;
 static int trackpoint_support = 1;
 static int elantech_support = 1;
 static int mux_disabled = -1;
+static int alps_support = 1;
 
 /* for backward compatibility */
 #define	OLD_MOUSE_GETHWINFO	_IOR('M', 1, old_mousehw_t)
@@ -2219,6 +2220,7 @@ psmdetach(device_t dev)
 {
 	struct psm_softc *sc;
 	int rid;
+	int error;
 
 	sc = device_get_softc(dev);
 	if (sc->state & PSM_OPEN)
@@ -2241,6 +2243,15 @@ psmdetach(device_t dev)
 	callout_drain(&sc->callout);
 	callout_drain(&sc->softcallout);
 
+	/* destroy sysctl three when module unloaded */
+	if (sc->syninfo.sysctl_tree != NULL) {
+		error = sysctl_ctx_free(&sc->syninfo.sysctl_ctx);
+		if (error != 0)
+			VLOG(2, (LOG_WARNING,
+			    "psm: failed to free synaptics sysctl context (%d)\n",
+			    error));
+		sc->syninfo.sysctl_tree = NULL;
+	}
 	return (0);
 }
 
@@ -3157,6 +3168,9 @@ SYSCTL_INT(_hw_psm, OID_AUTO, elantech_support, CTLFLAG_RDTUN,
 SYSCTL_INT(_hw_psm, OID_AUTO, mux_disabled, CTLFLAG_RDTUN,
     &mux_disabled, 0, "Disable active multiplexing");
 
+SYSCTL_INT(_hw_psm, OID_AUTO, alps_support, CTLFLAG_RDTUN,
+    &alps_support, 0, "Enable support for ALPS touchpads");
+
 static inline int psm_sysctl_bind(void) { return (0); }
 static inline void psm_sysctl_unbind(void) { }
 
@@ -3263,6 +3277,14 @@ psm_sysctl_bind(void)
 	psm_bind_table(debug_psm, psm_debug_binds, nitems(psm_debug_binds));
 	psm_bind_table(hw_psm, psm_hw_binds, nitems(psm_hw_binds));
 
+	if (sysctl_add_oid(&psm_sysctl_ctx, SYSCTL_CHILDREN(hw_psm),
+	    OID_AUTO, "alps_support", CTLFLAG_RDTUN | CTLTYPE_INT,
+	    &alps_support, 0, sysctl_handle_int, "I",
+	    "Enable support for ALPS touchpads", NULL) == NULL) {
+		VLOG(2, (LOG_WARNING,
+		    "psm: cannot create hw.psm.alps_support\n"));
+	};
+
 	/* get values for non-*TUN sysctls */
 	TUNABLE_INT_FETCH("debug.psm.hz", &psmhz);
 	TUNABLE_INT_FETCH("debug.psm.errsecs", &psmerrsecs);
@@ -3272,6 +3294,7 @@ psm_sysctl_bind(void)
 	TUNABLE_INT_FETCH("debug.psm.pkterrthresh", &pkterrthresh);
 	TUNABLE_INT_FETCH("hw.psm.tap_threshold", &tap_threshold);
 	TUNABLE_INT_FETCH("hw.psm.tap_timeout", &tap_timeout);
+	TUNABLE_INT_FETCH("hw.psm.alps_support", &alps_support);
 
 	psm_sysctl_bound = 1;
 	return (0);
@@ -11636,6 +11659,9 @@ enable_alps(struct psm_softc *sc, enum probearg arg)
 		PS2_MOUSE_VENDOR, PS2_MOUSE_ALPS_PRODUCT,
 		priv->proto_version));
 
+	if (!alps_support)
+		return (FALSE);
+
 	error = priv->hw_init(sc);
 	if (error)
 		return (FALSE);
@@ -11743,6 +11769,9 @@ proc_alps(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
     int *x, int *y, int *z)
 {
 	struct alps_data *priv = &sc->alps_data;
+
+	if (!alps_support)
+		return (0);
 
 	priv->process_packet(sc, pb);
 	return (0);
