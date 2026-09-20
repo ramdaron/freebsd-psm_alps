@@ -468,6 +468,24 @@ typedef struct elantechaction {
 	int			mask_v4wait;
 } elantechaction_t;
 
+/*
+ * Linux input-mt keeps per-slot state and allocates tracking IDs. FreeBSD
+ * evdev owns the event stream, but the ALPS compatibility layer still needs
+ * a small amount of state to preserve that API semantics.
+ *
+ * Keep this generic: later ALPS protocol implementations can reuse the same
+ * compatibility layer without baking V3-specific assumptions into it.
+ */
+#define PSM_MT_COMPAT_MAX_SLOTS 16
+typedef struct psm_mt_compat {
+	int		current_slot;
+	int		nslots;
+	int		tracking_id[PSM_MT_COMPAT_MAX_SLOTS];
+	unsigned int next_tracking_id;
+	uint32_t active_mask;
+	uint32_t frame_mask;
+} psm_mt_compat_t;
+
 /* driver control block */
 struct psm_softc {		/* Driver status information */
 	device_t	dev;
@@ -485,6 +503,7 @@ struct psm_softc {		/* Driver status information */
 	gesture_t	gesture;	/* Gesture context */
 	elantechhw_t	elanhw;		/* Elantech hardware information */
 	elantechaction_t elanaction;	/* Elantech action context */
+	psm_mt_compat_t	mt_compat;      /* Linux input-mt compatibility state */
 	trackpointinfo_t tpinfo;	/* TrackPoint configuration */
 	mousemode_t	mode;		/* operation mode */
 	mousemode_t	dflt_mode;	/* default operation mode */
@@ -7921,6 +7940,253 @@ ISA_PNP_INFO(psmcpnp_ids);
 #endif /* DEV_ISA */
 
 /* end code from original psm.c */
+
+/* start compat section */
+#define psmouse_dbg(sc, fmt, ...) \
+    VLOG(2, (LOG_DEBUG, "alps: " fmt, ##__VA_ARGS__))
+
+#define psmouse_warn(sc, fmt, ...) \
+    VDLOG(1, (sc)->dev, LOG_WARNING, "alps: " fmt, ##__VA_ARGS__)
+
+#define psmouse_err(sc, fmt, ...) \
+    VDLOG(0, (sc)->dev, LOG_ERR, "alps: " fmt, ##__VA_ARGS__)
+
+#define BIT(x)			(1UL << (x))
+#define ARRAY_SIZE(x)		nitems(x)
+
+#define PSMOUSE_FULL_PACKET	1
+#define PSMOUSE_GOOD_DATA	0
+#define PSMOUSE_BAD_DATA	(-1)
+
+#ifdef EVDEV_SUPPORT
+
+static void
+psm_mt_compat_init(struct evdev_dev *dev, int nslots)
+{
+	struct psm_softc *sc;
+	psm_mt_compat_t *mt;
+	int i;
+
+	if (dev == NULL)
+		return;
+
+	sc = evdev_get_softc(dev);
+	mt = &sc->mt_compat;
+	if (nslots < 1)
+		nslots = 1;
+	if (nslots > PSM_MT_COMPAT_MAX_SLOTS)
+		nslots = PSM_MT_COMPAT_MAX_SLOTS;
+
+	mt->current_slot = 0;
+	mt->nslots = nslots;
+	mt->next_tracking_id = 0;
+	mt->active_mask = 0;
+	mt->frame_mask = 0;
+	for (i = 0; i < PSM_MT_COMPAT_MAX_SLOTS; i++)
+		mt->tracking_id[i] = -1;
+
+	evdev_support_abs(dev, ABS_MT_SLOT, 0, nslots - 1, 0, 0, 0);
+	evdev_support_abs(dev, ABS_MT_TRACKING_ID, -1, INT_MAX, 0, 0, 0);
+}
+
+static void
+psm_mt_compat_slot(struct evdev_dev *dev, int slot)
+{
+	struct psm_softc *sc;
+	psm_mt_compat_t *mt;
+
+	if (dev == NULL)
+		return;
+
+	sc = evdev_get_softc(dev);
+	mt = &sc->mt_compat;
+	if (slot < 0 || slot >= mt->nslots)
+		return;
+
+	mt->current_slot = slot;
+	evdev_push_abs(dev, ABS_MT_SLOT, slot);
+}
+
+static void
+psm_mt_compat_slot_state(struct evdev_dev *dev, int tool __unused, bool active)
+{
+	struct psm_softc *sc;
+	psm_mt_compat_t *mt;
+	int slot, id;
+
+	if (dev == NULL)
+		return;
+
+	sc = evdev_get_softc(dev);
+	mt = &sc->mt_compat;
+	slot = mt->current_slot;
+	if (slot < 0 || slot >= mt->nslots)
+		return;
+
+	if (!active) {
+		evdev_push_abs(dev, ABS_MT_TRACKING_ID, -1);
+		mt->active_mask &= ~(1U << slot);
+		mt->frame_mask &= ~(1U << slot);
+		mt->tracking_id[slot] = -1;
+		return;
+	}
+
+	if ((mt->active_mask & (1U << slot)) == 0) {
+		if (mt->next_tracking_id >= INT_MAX)
+			mt->next_tracking_id = 0;
+		id = (int)mt->next_tracking_id++;
+		mt->tracking_id[slot] = id;
+		mt->active_mask |= 1U << slot;
+	}
+
+	id = mt->tracking_id[slot];
+	mt->frame_mask |= 1U << slot;
+	evdev_push_abs(dev, ABS_MT_TRACKING_ID, id);
+}
+
+static void
+psm_mt_compat_sync_frame(struct evdev_dev *dev)
+{
+	struct psm_softc *sc;
+	psm_mt_compat_t *mt;
+	uint32_t mask;
+	int slot;
+
+	if (dev == NULL)
+		return;
+
+	sc = evdev_get_softc(dev);
+	mt = &sc->mt_compat;
+
+	/* Release slots which were active in the previous frame but omitted. */
+	mask = mt->active_mask & ~mt->frame_mask;
+	while (mask != 0) {
+		slot = ffs((int)mask) - 1;
+		mt->current_slot = slot;
+		evdev_push_abs(dev, ABS_MT_SLOT, slot);
+		evdev_push_abs(dev, ABS_MT_TRACKING_ID, -1);
+		mt->active_mask &= ~(1U << slot);
+		mt->tracking_id[slot] = -1;
+		mask &= ~(1U << slot);
+	}
+	mt->frame_mask = 0;
+}
+
+#define input_report_abs(dev, code, val) do {					\
+	struct evdev_dev *report_dev = (dev);					\
+	if (report_dev != NULL)							\
+		evdev_push_abs(report_dev, (code), (val));			\
+} while (0)
+
+#define input_report_key(dev, code, val) do {					\
+	struct evdev_dev *report_dev = (dev);					\
+	if (report_dev != NULL)							\
+		evdev_push_key(report_dev, (code), (val));			\
+} while (0)
+
+#define input_report_rel(dev, code, val) do {					\
+	struct evdev_dev *report_dev = (dev);					\
+	if (report_dev != NULL)							\
+		evdev_push_rel(report_dev, (code), (val));			\
+} while (0)
+
+#define input_mt_slot(dev, slot) do {						\
+	psm_mt_compat_slot((dev), (slot));					\
+} while (0)
+
+#define input_mt_report_finger_count(dev, n) do {				\
+	struct evdev_dev *report_dev = (dev);					\
+	int n_fingers = (n);							\
+	if (report_dev != NULL) {						\
+		evdev_push_key(report_dev, BTN_TOOL_FINGER,	n_fingers == 1); \
+		evdev_push_key(report_dev, BTN_TOOL_DOUBLETAP,	n_fingers == 2); \
+		evdev_push_key(report_dev, BTN_TOOL_TRIPLETAP,	n_fingers == 3); \
+		evdev_push_key(report_dev, BTN_TOOL_QUADTAP,	n_fingers == 4); \
+		evdev_push_key(report_dev, BTN_TOUCH,		 n_fingers > 0); \
+		evdev_push_nfingers(report_dev, n_fingers);			\
+	}									\
+} while (0)
+
+#define input_sync(dev) do {							\
+	struct evdev_dev *report_dev = (dev);					\
+	if (report_dev != NULL)							\
+		evdev_sync(report_dev);						\
+} while (0)
+
+#define input_mt_sync_frame(dev) do {						\
+	psm_mt_compat_sync_frame((dev));					\
+} while (0)
+
+#define input_mt_report_slot_state(dev, tool, active) do {			\
+	psm_mt_compat_slot_state((dev), (tool), (active));			\
+} while (0)
+
+#define input_mt_init_slots(dev, nslots, flags) do {				\
+	psm_mt_compat_init((dev), (nslots));					\
+} while (0)
+
+#else	/* !EVDEV_SUPPORT */
+
+#define input_report_abs(dev, code, val)		do { } while (0)
+#define input_report_key(dev, code, val)		do { } while (0)
+#define input_report_rel(dev, code, val)		do { } while (0)
+#define input_mt_slot(dev, slot)			do { } while (0)
+#define input_mt_report_finger_count(dev, n)		do { } while (0)
+#define input_sync(dev)					do { } while (0)
+#define input_mt_sync_frame(dev)			do { } while (0)
+#define input_mt_report_slot_state(dev, tool, active)	do { } while (0)
+#define input_mt_init_slots(dev, nslots, flags)		do { } while (0)
+
+#endif	/* EVDEV_SUPPORT */
+
+#define PS2_CMD_MASK   0x00FF
+#define PS2_SEND_MASK  0xF000
+#define PS2_RECV_MASK  0x0F00
+
+#define PS2_SEND_COUNT(cmd) (((cmd) & PS2_SEND_MASK) >> 12)
+#define PS2_RECV_COUNT(cmd) (((cmd) & PS2_RECV_MASK) >> 8)
+
+static int
+ps2_command(KBDC kbdc, uint8_t *param, unsigned int command)
+{
+	int send_count = PS2_SEND_COUNT(command);
+	int recv_count = PS2_RECV_COUNT(command);
+	uint8_t cmd_code = command & PS2_CMD_MASK;
+	int i, res;
+	int error = 0;
+
+	if ((send_count != 0 || recv_count != 0) && param == NULL)
+		return (EINVAL);
+
+	if (send_count == 0) {
+		/* send command only */
+		res = send_aux_command(kbdc, cmd_code);
+	} else if (send_count == 1) {
+		/* send command and 1 byte of data */
+		res = send_aux_command_and_data(kbdc, cmd_code, param[0]);
+	} else {
+	    error = EINVAL;
+	    goto out;
+	}
+
+	if (res != PSM_ACK) {
+		error = EIO;
+		goto out;
+	}
+
+	for (i = 0; i < recv_count; i++) {
+		res = read_aux_data(kbdc);
+		if (res < 0) {
+			error = ETIMEDOUT;
+			goto out;
+		}
+		param[i] = (uint8_t)res;
+	}
+
+out:
+	return (error);
+}
+/* end compat section */
 
 /*
  * start GPL-2 code
