@@ -211,10 +211,19 @@ struct alps_nibble_commands {
 	unsigned char data;
 };
 
-#if 0
 struct alps_bitmap_point {
 	int start_bit;
 	int num_bits;
+};
+
+/* include/linux/input/mt.h */
+/**
+ * struct input_mt_pos - contact position
+ * @x: horizontal coordinate
+ * @y: vertical coordinate
+ */
+struct input_mt_pos {
+	s16 x, y;
 };
 
 /**
@@ -234,7 +243,7 @@ struct alps_bitmap_point {
  * @ts_right: Right trackstick button is active.
  * @ts_middle: Middle trackstick button is active.
  */
-struct alps_fields {
+typedef struct alps_fields {
 	unsigned int x_map;
 	unsigned int y_map;
 	unsigned int fingers;
@@ -253,11 +262,11 @@ struct alps_fields {
 	unsigned int ts_left:1;
 	unsigned int ts_right:1;
 	unsigned int ts_middle:1;
-};
-#endif
+} alps_fields_t;
 
 /* FreeBSD compat */
 struct psm_softc;
+struct packetbuf;
 
 /**
  * struct alps_data - private data structure for the ALPS driver
@@ -318,25 +327,26 @@ typedef struct alps_data {
 	unsigned int y_res;
 
 	int (*hw_init)(struct psm_softc *psmouse);
-#if 0
-	void (*process_packet)(struct psmouse *psmouse);
+	void (*process_packet)(struct psm_softc *psmouse, struct packetbuf *pb);
 	int (*decode_fields)(struct alps_fields *f, unsigned char *p,
-			      struct psmouse *psmouse);
-	void (*set_abs_params)(struct alps_data *priv, struct input_dev *dev1);
-
+			      struct psm_softc *psmouse);
+	void (*set_abs_params)(struct alps_data *priv, struct evdev_dev *dev1);
 	int prev_fin;
 	int multi_packet;
 	int second_touch;
 	unsigned char multi_data[6];
 	struct alps_fields f;
 	u8 quirks;
+#if 0
 	struct timer_list timer;
 #endif
+	uint8_t pktsize;
 } alps_data_t;
 
-#if 0
+
 #define ALPS_QUIRK_TRACKSTICK_BUTTONS	1 /* trakcstick buttons in trackstick packet */
 
+#if 0
 int alps_detect(struct psmouse *psmouse, bool set_properties);
 int alps_init(struct psmouse *psmouse);
 
