@@ -140,6 +140,9 @@ typedef uint64_t u64;
  * end GPL-2 code
  */
 
+/* should be in mouse.h */
+#define	MOUSE_MODEL_ALPS	64
+
 /*
  * Driver specific options: the following options may be set by
  * `options' statements in the kernel configuration file.
@@ -503,6 +506,7 @@ struct psm_softc {		/* Driver status information */
 	gesture_t	gesture;	/* Gesture context */
 	elantechhw_t	elanhw;		/* Elantech hardware information */
 	elantechaction_t elanaction;	/* Elantech action context */
+	alps_data_t	alps_data;	/* ALPS hardware information */
 	psm_mt_compat_t	mt_compat;      /* Linux input-mt compatibility state */
 	trackpointinfo_t tpinfo;	/* TrackPoint configuration */
 	mousemode_t	mode;		/* operation mode */
@@ -745,6 +749,7 @@ static probefunc_t	enable_single_synaptics_mux;
 static probefunc_t	enable_trackpoint;
 static probefunc_t	enable_versapad;
 static probefunc_t	enable_elantech;
+static probefunc_t	enable_alps;
 
 static void set_trackpoint_parameters(struct psm_softc *sc);
 static void synaptics_passthrough_on(struct psm_softc *sc);
@@ -784,6 +789,8 @@ static struct {
 	  0x04, MOUSE_ELANTECH_PACKETSIZE, enable_elantech },
 	{ MOUSE_MODEL_INTELLI,		/* Microsoft IntelliMouse */
 	  0x08, MOUSE_PS2INTELLI_PACKETSIZE, enable_msintelli },
+	{ MOUSE_MODEL_ALPS,		/* ALPS from linux */
+	  0x00, 10, enable_alps },
 	{ MOUSE_MODEL_GLIDEPOINT,	/* ALPS GlidePoint */
 	  0xc0, MOUSE_PS2_PACKETSIZE, enable_aglide },
 	{ MOUSE_MODEL_THINK,		/* Kensington ThinkingMouse */
@@ -1037,6 +1044,7 @@ model_name(int model)
 	} models[] = {
 		{ MOUSE_MODEL_NETSCROLL,	"NetScroll" },
 		{ MOUSE_MODEL_NET,		"NetMouse/NetScroll Optical" },
+		{ MOUSE_MODEL_ALPS,		"ALPS" },
 		{ MOUSE_MODEL_GLIDEPOINT,	"GlidePoint" },
 		{ MOUSE_MODEL_THINK,		"ThinkingMouse" },
 		{ MOUSE_MODEL_INTELLI,		"IntelliMouse" },
@@ -1744,6 +1752,12 @@ psmprobe(device_t dev)
 	kbdc_lock(sc->kbdc, FALSE);
 	return (0);
 }
+
+/* used outside evdev */
+#define	PS2_MOUSE_ALPS_NAME		"AlpsPS/2 ALPS GlidePoint"
+#define	PS2_MOUSE_ALPS_DP_NAME		"AlpsPS/2 ALPS DualPoint TouchPad"
+#define	PS2_MOUSE_ALPS_ST_NAME		"AlpsPS/2 ALPS DualPoint Stick"
+#define	PS2_MOUSE_ALPS_PRODUCT		0x0008
 
 #ifdef EVDEV_SUPPORT
 /* Values are taken from Linux drivers for userland software compatibility */
@@ -8249,6 +8263,7 @@ out:
 #include "alps.h"
 #include "trackpoint.h"
 
+#endif
 /*
  * Definitions for ALPS version 3 and 4 command mode protocol
  */
@@ -8277,6 +8292,7 @@ static const struct alps_nibble_commands alps_v3_nibble_commands[] = {
 	{ PSMOUSE_CMD_SETSCALE11,	0x00 }, /* f */
 };
 
+#if 0
 static const struct alps_nibble_commands alps_v4_nibble_commands[] = {
 	{ PSMOUSE_CMD_ENABLE,		0x00 }, /* 0 */
 	{ PSMOUSE_CMD_RESET_DIS,	0x00 }, /* 1 */
@@ -8314,6 +8330,7 @@ static const struct alps_nibble_commands alps_v6_nibble_commands[] = {
 	{ PSMOUSE_CMD_SETSCALE21,	0x00 }, /* e */
 	{ PSMOUSE_CMD_SETSCALE11,	0x00 }, /* f */
 };
+#endif
 
 static const struct alps_model_info alps_model_data[] = {
 	/*
@@ -8376,6 +8393,7 @@ static const struct alps_protocol_info alps_v9_protocol_data = {
 	ALPS_PROTO_V9, 0xc8, 0xc8, 0
 };
 
+#if 0
 /*
  * Some v2 models report the stick buttons in separate bits
  */
@@ -9897,31 +9915,28 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 
 	return PSMOUSE_GOOD_DATA;
 }
+#endif
 
-static int alps_command_mode_send_nibble(struct psmouse *psmouse, int nibble)
+static int alps_command_mode_send_nibble(struct psm_softc *psmouse, int nibble)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	struct alps_data *priv = psmouse->private;
+	KBDC ps2dev = psmouse->kbdc;
+	struct alps_data *priv = &psmouse->alps_data;
 	int command;
-	unsigned char *param;
-	unsigned char dummy[4];
-
-	BUG_ON(nibble > 0xf);
+	uint8_t param;
 
 	command = priv->nibble_commands[nibble].command;
-	param = (command & 0x0f00) ?
-		dummy : (unsigned char *)&priv->nibble_commands[nibble].data;
+	param = priv->nibble_commands[nibble].data;
 
-	if (ps2_command(ps2dev, param, command))
+	if (ps2_command(ps2dev, &param, command))
 		return -1;
 
 	return 0;
 }
 
-static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
+static int alps_command_mode_set_addr(struct psm_softc *psmouse, int addr)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	struct alps_data *priv = psmouse->private;
+	KBDC ps2dev = psmouse->kbdc;
+	struct alps_data *priv = &psmouse->alps_data;
 	int i, nibble;
 
 	if (ps2_command(ps2dev, NULL, priv->addr_command))
@@ -9936,9 +9951,9 @@ static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
 	return 0;
 }
 
-static int __alps_command_mode_read_reg(struct psmouse *psmouse, int addr)
+static int __alps_command_mode_read_reg(struct psm_softc *psmouse, int addr)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	KBDC ps2dev = psmouse->kbdc;
 	unsigned char param[4];
 
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
@@ -9955,12 +9970,13 @@ static int __alps_command_mode_read_reg(struct psmouse *psmouse, int addr)
 	return param[2];
 }
 
-static int alps_command_mode_read_reg(struct psmouse *psmouse, int addr)
+static int alps_command_mode_read_reg(struct psm_softc *psmouse, int addr)
 {
 	if (alps_command_mode_set_addr(psmouse, addr))
 		return -1;
 	return __alps_command_mode_read_reg(psmouse, addr);
 }
+#if 0
 
 static int __alps_command_mode_write_reg(struct psmouse *psmouse, u8 value)
 {
@@ -9979,10 +9995,11 @@ static int alps_command_mode_write_reg(struct psmouse *psmouse, int addr,
 	return __alps_command_mode_write_reg(psmouse, value);
 }
 
-static int alps_rpt_cmd(struct psmouse *psmouse, int init_command,
+#endif
+static int alps_rpt_cmd(struct psm_softc *psmouse, int init_command,
 			int repeated_command, unsigned char *param)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	KBDC ps2dev = psmouse->kbdc;
 
 	param[0] = 0;
 	if (init_command && ps2_command(ps2dev, param, init_command))
@@ -9997,8 +10014,8 @@ static int alps_rpt_cmd(struct psmouse *psmouse, int init_command,
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return -EIO;
 
-	psmouse_dbg(psmouse, "%2.2X report: %3ph\n",
-		    repeated_command, param);
+	psmouse_dbg(psmouse, "%2.2X report: %02x %02x %02x\n",
+		    repeated_command, param[0], param[1], param[2]);
 	return 0;
 }
 
@@ -10018,7 +10035,7 @@ static bool alps_check_valid_firmware_id(unsigned char id[])
 	return false;
 }
 
-static int alps_enter_command_mode(struct psmouse *psmouse)
+static int alps_enter_command_mode(struct psm_softc *psmouse)
 {
 	unsigned char param[4];
 
@@ -10035,14 +10052,15 @@ static int alps_enter_command_mode(struct psmouse *psmouse)
 	return 0;
 }
 
-static inline int alps_exit_command_mode(struct psmouse *psmouse)
+static inline int alps_exit_command_mode(struct psm_softc *psmouse)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	KBDC ps2dev = psmouse->kbdc;
 	if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM))
 		return -1;
 	return 0;
 }
 
+#if 0
 /*
  * For DualPoint devices select the device that should respond to
  * subsequent commands. It looks like glidepad is behind stickpointer,
@@ -10344,8 +10362,9 @@ static int alps_absolute_mode_v3(struct psmouse *psmouse)
 
 	return 0;
 }
+#endif
 
-static int alps_probe_trackstick_v3_v7(struct psmouse *psmouse, int reg_base)
+static int alps_probe_trackstick_v3_v7(struct psm_softc *psmouse, int reg_base)
 {
 	int ret = -EIO, reg_val;
 
@@ -10364,6 +10383,7 @@ error:
 	return ret;
 }
 
+#if 0
 static int alps_setup_trackstick_v3(struct psmouse *psmouse, int reg_base)
 {
 	int ret = 0;
@@ -10933,14 +10953,15 @@ error:
 	alps_exit_command_mode(psmouse);
 	return ret;
 }
+#endif
 
-static int alps_set_protocol(struct psmouse *psmouse,
+static int alps_set_protocol(struct psm_softc *psmouse,
 			     struct alps_data *priv,
 			     const struct alps_protocol_info *protocol)
 {
-	psmouse->private = priv;
-
+#if 0
 	timer_setup(&priv->timer, alps_flush_packet, 0);
+#endif
 
 	priv->proto_version = protocol->version;
 	priv->byte0 = protocol->byte0;
@@ -10953,6 +10974,7 @@ static int alps_set_protocol(struct psmouse *psmouse,
 	priv->y_bits = 11;
 
 	switch (priv->proto_version) {
+#if 0
 	case ALPS_PROTO_V1:
 	case ALPS_PROTO_V2:
 		priv->hw_init = alps_hw_init_v1_v2;
@@ -10963,12 +10985,14 @@ static int alps_set_protocol(struct psmouse *psmouse,
 		if (dmi_check_system(alps_dmi_has_separate_stick_buttons))
 			priv->flags |= ALPS_STICK_BITS;
 		break;
-
+#endif
 	case ALPS_PROTO_V3:
+#if 0
 		priv->hw_init = alps_hw_init_v3;
 		priv->process_packet = alps_process_packet_v3;
 		priv->set_abs_params = alps_set_abs_params_semi_mt;
 		priv->decode_fields = alps_decode_pinnacle;
+#endif
 		priv->nibble_commands = alps_v3_nibble_commands;
 		priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
 
@@ -10978,6 +11002,7 @@ static int alps_set_protocol(struct psmouse *psmouse,
 
 		break;
 
+#if 0
 	case ALPS_PROTO_V3_RUSHMORE:
 		priv->hw_init = alps_hw_init_rushmore_v3;
 		priv->process_packet = alps_process_packet_v3;
@@ -11056,6 +11081,12 @@ static int alps_set_protocol(struct psmouse *psmouse,
 			return -EIO;
 
 		break;
+#endif
+	default:
+		psmouse_err(psmouse,
+			"ALPS protocol 0x%04x is not supported by this "
+			"driver yet\n", priv->proto_version);
+		return -EINVAL;
 	}
 
 	return 0;
@@ -11077,6 +11108,7 @@ static const struct alps_protocol_info *alps_match_table(unsigned char *e7,
 	return NULL;
 }
 
+#if 0
 static bool alps_is_cs19_trackpoint(struct psmouse *psmouse)
 {
 	u8 param[2] = { 0 };
@@ -11093,8 +11125,9 @@ static bool alps_is_cs19_trackpoint(struct psmouse *psmouse)
 	 */
 	return param[0] == TP_VARIANT_ALPS && ((param[1] & 0xf0) == 0x20);
 }
+#endif
 
-static int alps_identify(struct psmouse *psmouse, struct alps_data *priv)
+static int alps_identify(struct psm_softc *psmouse, struct alps_data *priv)
 {
 	const struct alps_protocol_info *protocol;
 	unsigned char e6[4], e7[4], ec[4];
@@ -11146,12 +11179,13 @@ static int alps_identify(struct psmouse *psmouse, struct alps_data *priv)
 		} else if (e7[0] == 0x73 && e7[1] == 0x03 && e7[2] == 0xc8) {
 			protocol = &alps_v9_protocol_data;
 			psmouse_warn(psmouse,
-				     "Unsupported ALPS V9 touchpad: E7=%3ph, EC=%3ph\n",
-				     e7, ec);
+				     "Unsupported ALPS V9 touchpad: E7=%02x %02x %02x, EC=%02x %02x %02x\n",
+				     e7[0], e7[1], e7[2], ec[0], ec[1], ec[2]);
 			return -EINVAL;
 		} else {
 			psmouse_dbg(psmouse,
-				    "Likely not an ALPS touchpad: E7=%3ph, EC=%3ph\n", e7, ec);
+				    "Likely not an ALPS touchpad: E7=%02x %02x %02x, EC=%02x %02x %02x\n",
+					e7[0], e7[1], e7[2], ec[0], ec[1], ec[2]);
 			return -EINVAL;
 		}
 	}
@@ -11168,6 +11202,7 @@ static int alps_identify(struct psmouse *psmouse, struct alps_data *priv)
 	return 0;
 }
 
+#if 0
 static int alps_reconnect(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
@@ -11452,3 +11487,23 @@ int alps_detect(struct psmouse *psmouse, bool set_properties)
 /*
  * end GPL-2 code
  */
+
+static int
+enable_alps(struct psm_softc *sc, enum probearg arg)
+{
+	int error;
+	struct alps_data *priv = &sc->alps_data;
+	VLOG(3, (LOG_DEBUG, "alps: BEGIN init\n"));
+	set_mouse_sampling_rate(sc->kbdc, 100);
+	error = alps_identify(sc, priv);
+	if (error)
+		return (FALSE);
+
+	VLOG(1, (LOG_DEBUG, "alps: %s Vendor=%04x Product=%04x Version=%04x\n",
+		(priv->flags & ALPS_DUALPOINT) ?
+			 PS2_MOUSE_ALPS_DP_NAME : PS2_MOUSE_ALPS_NAME,
+		PS2_MOUSE_VENDOR, PS2_MOUSE_ALPS_PRODUCT,
+		priv->proto_version));
+
+	return (FALSE);
+}

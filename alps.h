@@ -11,6 +11,7 @@
 
 #if 0
 #include <linux/input/mt.h>
+#endif
 
 #define ALPS_PROTO_V1		0x100
 #define ALPS_PROTO_V2		0x200
@@ -25,6 +26,7 @@
 
 #define MAX_TOUCHES	4
 
+#if 0
 #define DOLPHIN_COUNT_PER_ELECTRODE	64
 #define DOLPHIN_PROFILE_XOFFSET		8	/* x-electrode offset */
 #define DOLPHIN_PROFILE_YOFFSET		1	/* y-electrode offset */
@@ -162,6 +164,7 @@ enum V7_PACKET_ID {
 	 V7_PACKET_ID_NEW,
 	 V7_PACKET_ID_UNKNOWN,
 };
+#endif
 
 /**
  * struct alps_protocol_info - information about protocol used by a device
@@ -208,6 +211,7 @@ struct alps_nibble_commands {
 	unsigned char data;
 };
 
+#if 0
 struct alps_bitmap_point {
 	int start_bit;
 	int num_bits;
@@ -250,6 +254,7 @@ struct alps_fields {
 	unsigned int ts_right:1;
 	unsigned int ts_middle:1;
 };
+#endif
 
 /**
  * struct alps_data - private data structure for the ALPS driver
@@ -284,13 +289,15 @@ struct alps_fields {
  * @quirks: Bitmap of ALPS_QUIRK_*.
  * @timer: Timer for flushing out the final report packet in the stream.
  */
-struct alps_data {
+typedef struct alps_data {
+#if 0
 	struct psmouse *psmouse;
 	struct input_dev *dev2;
 	struct input_dev *dev3;
 	char phys2[32];
 	char phys3[32];
 	struct work_struct dev3_register_work;
+#endif
 
 	/* these are autodetected when the device is identified */
 	const struct alps_nibble_commands *nibble_commands;
@@ -307,6 +314,7 @@ struct alps_data {
 	unsigned int x_res;
 	unsigned int y_res;
 
+#if 0
 	int (*hw_init)(struct psmouse *psmouse);
 	void (*process_packet)(struct psmouse *psmouse);
 	int (*decode_fields)(struct alps_fields *f, unsigned char *p,
@@ -320,8 +328,10 @@ struct alps_data {
 	struct alps_fields f;
 	u8 quirks;
 	struct timer_list timer;
-};
+#endif
+} alps_data_t;
 
+#if 0
 #define ALPS_QUIRK_TRACKSTICK_BUTTONS	1 /* trakcstick buttons in trackstick packet */
 
 int alps_detect(struct psmouse *psmouse, bool set_properties);
