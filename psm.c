@@ -726,6 +726,9 @@ static void	psmsmoother(struct psm_softc *, finger_t *, int,
 		    mousestatus_t *, int *, int *);
 static int	tame_mouse(struct psm_softc *, packetbuf_t *, mousestatus_t *,
 		    u_char *);
+static void	psmintr_alps(void *arg);
+static int	proc_alps(struct psm_softc *, packetbuf_t *,
+		    mousestatus_t *, int *, int *, int *);
 
 /* vendor specific features */
 enum probearg { PROBE, REINIT };
@@ -1848,6 +1851,15 @@ psm_register(device_t dev, int model_code)
 	case MOUSE_MODEL_4DPLUS:
 		nwheels = 1;
 		break;
+
+	case MOUSE_MODEL_ALPS:
+		if ((sc->alps_data.flags & ALPS_DUALPOINT) == 0)
+			break;	/* GlidePoint: generic relative mouse */
+		name = PS2_MOUSE_ALPS_ST_NAME;
+		product = PS2_MOUSE_ALPS_PRODUCT;
+		nbuttons = 3;
+		is_pointing_stick = true;
+	break;
 	}
 
 	evdev_r = evdev_alloc();
@@ -1873,6 +1885,11 @@ psm_register(device_t dev, int model_code)
 	}
 	for (i = 0; i < nbuttons; i++)
 		evdev_support_key(evdev_r, BTN_MOUSE + i);
+	if (model_code == MOUSE_MODEL_ALPS &&
+	    (sc->alps_data.flags & ALPS_DUALPOINT_WITH_PRESSURE)) {
+		evdev_support_event(evdev_r, EV_ABS);
+		evdev_support_abs(evdev_r, ABS_PRESSURE, 0, 127, 0, 0, 0);
+	}
 
 	error = evdev_register_mtx(evdev_r, &Giant);
 	if (error)
@@ -2022,6 +2039,71 @@ psm_register_elantech(device_t dev)
 		sc->evdev_a = evdev_a;
 	return (error);
 }
+
+/* based on alps_init() */
+static int
+psm_register_alps(device_t dev)
+{
+	struct psm_softc *sc = device_get_softc(dev);
+	struct evdev_dev *evdev_a;
+	struct alps_data *priv = &sc->alps_data;
+	int error;
+
+	evdev_a = evdev_alloc();
+	evdev_set_name(evdev_a, (sc->alps_data.flags & ALPS_DUALPOINT) ?
+		PS2_MOUSE_ALPS_DP_NAME : PS2_MOUSE_ALPS_NAME);
+	evdev_set_phys(evdev_a, device_get_nameunit(dev));
+	evdev_set_id(evdev_a, BUS_I8042, PS2_MOUSE_VENDOR,
+				 PS2_MOUSE_ALPS_PRODUCT, priv->proto_version);
+	evdev_set_methods(evdev_a, sc, &psm_ev_methods_a);
+
+	evdev_set_flag(evdev_a, EVDEV_FLAG_MT_AUTOREL);
+
+	priv->set_abs_params(priv, evdev_a);
+
+	evdev_support_abs(evdev_a, ABS_X, 0, priv->x_max, 0, 0, priv->x_res);
+	evdev_support_abs(evdev_a, ABS_Y, 0, priv->y_max, 0, 0, priv->y_res);
+
+	evdev_support_event(evdev_a, EV_SYN);
+	evdev_support_event(evdev_a, EV_KEY);
+	evdev_support_event(evdev_a, EV_ABS);
+	evdev_support_prop(evdev_a, INPUT_PROP_POINTER);
+
+	evdev_support_key(evdev_a, BTN_TOUCH);
+	evdev_support_key(evdev_a, BTN_LEFT);
+
+	if (priv->flags & ALPS_WHEEL) {
+		evdev_support_event(evdev_a, EV_REL);
+		evdev_support_rel(evdev_a, REL_WHEEL);
+	}
+
+	if (sc->alps_data.flags & (ALPS_FW_BK_1 | ALPS_FW_BK_2)) {
+		evdev_support_key(evdev_a, BTN_BACK);
+		evdev_support_key(evdev_a, BTN_FORWARD);
+	}
+
+	if (sc->alps_data.flags & ALPS_FOUR_BUTTONS) {
+		evdev_support_key(evdev_a, BTN_0);
+		evdev_support_key(evdev_a, BTN_1);
+		evdev_support_key(evdev_a, BTN_2);
+		evdev_support_key(evdev_a, BTN_3);
+		evdev_support_key(evdev_a, BTN_RIGHT);
+	} else if (sc->alps_data.flags & ALPS_BUTTONPAD) {
+		evdev_support_prop(evdev_a, INPUT_PROP_BUTTONPAD);
+	} else {
+		evdev_support_key(evdev_a, BTN_MIDDLE);
+		evdev_support_key(evdev_a, BTN_RIGHT);
+	}
+
+	error = evdev_register_mtx(evdev_a, &Giant);
+	if (error)
+		evdev_free(evdev_a);
+	else
+		sc->evdev_a = evdev_a;
+	if (!error && sc->alps_data.flags & ALPS_DUALPOINT)
+		error = psm_register(dev, MOUSE_MODEL_ALPS);
+	return (error);
+}
 #endif
 
 static int
@@ -2070,6 +2152,10 @@ psmattach(device_t dev)
 		error = psm_register_elantech(dev);
 		break;
 
+	case MOUSE_MODEL_ALPS:
+		error = psm_register_alps(dev);
+		break;
+
 	default:
 		error = psm_register(dev, sc->hw.model);
 	}
@@ -2084,6 +2170,7 @@ psmattach(device_t dev)
 	case MOUSE_MODEL_GLIDEPOINT:
 	case MOUSE_MODEL_VERSAPAD:
 	case MOUSE_MODEL_ELANTECH:
+	case MOUSE_MODEL_ALPS:
 		sc->config |= PSM_CONFIG_INITAFTERSUSPEND;
 		break;
 	default:
@@ -3258,6 +3345,12 @@ psmintr(void *arg)
 	if (aux_mux_is_enabled(sc->kbdc))
 		VLOG(2, (LOG_DEBUG, "psmintr: active multiplexing mode is not "
 		    "supported!\n"));
+
+	/* Separate function without checking syncmask */
+	if (sc->hw.model == MOUSE_MODEL_ALPS) {
+		psmintr_alps(arg);
+		return;
+	}
 
 	/* read until there is nothing to read */
 	while((c = read_aux_data_no_wait(sc->kbdc)) != -1) {
@@ -5386,6 +5479,14 @@ psmsoftintr(void *arg)
 			}
 			break;
 
+		case MOUSE_MODEL_ALPS:
+			if (proc_alps(sc, pb, &ms, &x, &y, &z) != 0) {
+				VLOG(3, (LOG_DEBUG, "alps: "
+				    "packet rejected\n"));
+				goto next;
+			}
+			break;
+
 		case MOUSE_MODEL_TRACKPOINT:
 		case MOUSE_MODEL_GENERIC:
 		default:
@@ -5399,7 +5500,8 @@ psmsoftintr(void *arg)
 #ifdef EVDEV_SUPPORT
 	if (evdev_rcpt_mask & EVDEV_RCPT_HW_MOUSE &&
 	    sc->hw.model != MOUSE_MODEL_ELANTECH &&
-	    sc->hw.model != MOUSE_MODEL_SYNAPTICS) {
+	    sc->hw.model != MOUSE_MODEL_SYNAPTICS &&
+	    sc->hw.model != MOUSE_MODEL_ALPS) {
 		evdev_push_rel(sc->evdev_r, REL_X, x);
 		evdev_push_rel(sc->evdev_r, REL_Y, -y);
 
@@ -8441,6 +8543,7 @@ static void alps_set_abs_params_v7(struct alps_data *priv,
 				   struct input_dev *dev1);
 static void alps_set_abs_params_ss4_v2(struct alps_data *priv,
 				       struct input_dev *dev1);
+#endif
 
 /* Packet formats are described in Documentation/input/devices/alps.rst */
 
@@ -8450,6 +8553,7 @@ static bool alps_is_valid_first_byte(struct alps_data *priv,
 	return (data & priv->mask0) == priv->byte0;
 }
 
+#if 0
 static void alps_report_buttons(struct input_dev *dev1, struct input_dev *dev2,
 				int left, int right, int middle)
 {
@@ -9175,20 +9279,22 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
 
 	alps_report_semi_mt_data(psmouse, f->fingers);
 }
+#endif
 
-static bool alps_is_valid_package_v7(struct psmouse *psmouse)
+static bool alps_is_valid_package_v7(struct psm_softc *psmouse, packetbuf_t *pb)
 {
-	switch (psmouse->pktcnt) {
+	switch (pb->inputbytes) {
 	case 3:
-		return (psmouse->packet[2] & 0x40) == 0x40;
+		return (pb->ipacket[2] & 0x40) == 0x40;
 	case 4:
-		return (psmouse->packet[3] & 0x48) == 0x48;
+		return (pb->ipacket[3] & 0x48) == 0x48;
 	case 6:
-		return (psmouse->packet[5] & 0x40) == 0x00;
+		return (pb->ipacket[5] & 0x40) == 0x00;
 	}
 	return true;
 }
 
+#if 0
 static unsigned char alps_get_packet_id_v7(char *byte)
 {
 	unsigned char packet_id;
@@ -9625,16 +9731,18 @@ static void alps_process_packet_ss4_v2(struct psmouse *psmouse)
 	input_report_abs(dev, ABS_PRESSURE, f->pressure);
 	input_sync(dev);
 }
+#endif
 
-static bool alps_is_valid_package_ss4_v2(struct psmouse *psmouse)
+static bool alps_is_valid_package_ss4_v2(struct psm_softc *psmouse, packetbuf_t *pb)
 {
-	if (psmouse->pktcnt == 4 && ((psmouse->packet[3] & 0x08) != 0x08))
+	if (pb->inputbytes == 4 && ((pb->ipacket[3] & 0x08) != 0x08))
 		return false;
-	if (psmouse->pktcnt == 6 && ((psmouse->packet[5] & 0x10) != 0x0))
+	if (pb->inputbytes == 6 && ((pb->ipacket[5] & 0x10) != 0x0))
 		return false;
 	return true;
 }
 
+#if 0
 static DEFINE_MUTEX(alps_mutex);
 
 static int alps_do_register_bare_ps2_mouse(struct alps_data *priv)
@@ -9846,11 +9954,20 @@ static void alps_flush_packet(struct timer_list *t)
 		psmouse->pktcnt = 0;
 	}
 }
+#endif
 
-static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
+static int alps_process_byte(struct psm_softc *psmouse, int c)
 {
-	struct alps_data *priv = psmouse->private;
+	struct alps_data *priv = &psmouse->alps_data;
+	packetbuf_t *pb = &psmouse->pqueue[psmouse->pqueue_end];
+	int pktcnt;
 
+	/* save byte */
+	pktcnt = pb->inputbytes; /* psmouse->pktcnt */
+	pb->ipacket[pktcnt] = c;
+	pb->inputbytes = ++pktcnt;
+
+#if 0
 	/*
 	 * Check if we are dealing with a bare PS/2 packet, presumably from
 	 * a device connected to the external PS/2 port. Because bare PS/2
@@ -9876,24 +9993,26 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 	    psmouse->pktcnt >= 4 && (psmouse->packet[3] & 0x0f) == 0x0f) {
 		return alps_handle_interleaved_ps2(psmouse);
 	}
+#endif
 
-	if (!alps_is_valid_first_byte(priv, psmouse->packet[0])) {
+	if (!alps_is_valid_first_byte(priv, pb->ipacket[0])) {
 		psmouse_dbg(psmouse,
 			    "refusing packet[0] = %x (mask0 = %x, byte0 = %x)\n",
-			    psmouse->packet[0], priv->mask0, priv->byte0);
+			    pb->ipacket[0], priv->mask0, priv->byte0);
+		pb->inputbytes = 0;
 		return PSMOUSE_BAD_DATA;
 	}
 
 	/* Bytes 2 - pktsize should have 0 in the highest bit */
 	if (priv->proto_version < ALPS_PROTO_V5 &&
-	    psmouse->pktcnt >= 2 && psmouse->pktcnt <= psmouse->pktsize &&
-	    (psmouse->packet[psmouse->pktcnt - 1] & 0x80)) {
+	    pktcnt >= 2 && pktcnt <= priv->pktsize &&
+	    (pb->ipacket[pktcnt - 1] & 0x80)) {
 		psmouse_dbg(psmouse, "refusing packet[%i] = %x\n",
-			    psmouse->pktcnt - 1,
-			    psmouse->packet[psmouse->pktcnt - 1]);
+			    pktcnt - 1,
+			    pb->ipacket[pktcnt - 1]);
 
 		if (priv->proto_version == ALPS_PROTO_V3_RUSHMORE &&
-		    psmouse->pktcnt == psmouse->pktsize) {
+		    pktcnt == priv->pktsize) {
 			/*
 			 * Some Dell boxes, such as Latitude E6440 or E7440
 			 * with closed lid, quite often smash last byte of
@@ -9905,28 +10024,26 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 			 */
 			return PSMOUSE_FULL_PACKET;
 		}
-
+		pb->inputbytes = 0;
 		return PSMOUSE_BAD_DATA;
 	}
 
 	if ((priv->proto_version == ALPS_PROTO_V7 &&
-			!alps_is_valid_package_v7(psmouse)) ||
+			!alps_is_valid_package_v7(psmouse, pb)) ||
 	    (priv->proto_version == ALPS_PROTO_V8 &&
-			!alps_is_valid_package_ss4_v2(psmouse))) {
+			!alps_is_valid_package_ss4_v2(psmouse, pb))) {
 		psmouse_dbg(psmouse, "refusing packet[%i] = %x\n",
-			    psmouse->pktcnt - 1,
-			    psmouse->packet[psmouse->pktcnt - 1]);
+			    pktcnt - 1,
+			    pb->ipacket[pktcnt - 1]);
 		return PSMOUSE_BAD_DATA;
 	}
 
-	if (psmouse->pktcnt == psmouse->pktsize) {
-		priv->process_packet(psmouse);
+	if (pktcnt == priv->pktsize) {
 		return PSMOUSE_FULL_PACKET;
 	}
 
 	return PSMOUSE_GOOD_DATA;
 }
-#endif
 
 static int alps_command_mode_send_nibble(struct psm_softc *psmouse, int nibble)
 {
@@ -11511,6 +11628,7 @@ enable_alps(struct psm_softc *sc, enum probearg arg)
 	error = alps_identify(sc, priv);
 	if (error)
 		return (FALSE);
+	priv->pktsize = priv->proto_version == ALPS_PROTO_V4 ? 8 : 6;
 
 	VLOG(1, (LOG_DEBUG, "alps: %s Vendor=%04x Product=%04x Version=%04x\n",
 		(priv->flags & ALPS_DUALPOINT) ?
@@ -11522,5 +11640,110 @@ enable_alps(struct psm_softc *sc, enum probearg arg)
 	if (error)
 		return (FALSE);
 
-	return (FALSE);
+	return (TRUE);
+}
+
+/*
+ * based on psmintr()
+ * combined with ApplePS2ALPSGlidePoint::interruptOccurred() (VoodooPS2),
+ * alps_process_byte() + alps_is_valid_*() (linux).
+ */
+static void
+psmintr_alps(void *arg)
+{
+	struct psm_softc *sc = arg;
+	struct alps_data *priv = &sc->alps_data;
+	struct timeval now;
+	packetbuf_t *pb;
+	int c;
+
+	/* read until there is nothing to read */
+	while ((c = read_aux_data_no_wait(sc->kbdc)) != -1) {
+		pb = &sc->pqueue[sc->pqueue_end];
+
+		/* discard the byte if the device is not open */
+		if (!(sc->state & (PSM_OPEN | PSM_EV_OPEN_R | PSM_EV_OPEN_A)))
+			continue;
+
+		/* reset byte count if the delay was too long */
+		getmicrouptime(&now);
+		if ((pb->inputbytes > 0) &&
+			timevalcmp(&now, &sc->inputtimeout, >)) {
+			VLOG(3, (LOG_DEBUG, "psmintr_alps: delay too long; "
+			"resetting byte count\n"));
+			pb->inputbytes = 0;
+			sc->syncerrors = 0;
+			sc->pkterrors = 0;
+		}
+
+		sc->inputtimeout.tv_sec = PSM_INPUT_TIMEOUT / 1000000;
+		sc->inputtimeout.tv_usec = PSM_INPUT_TIMEOUT % 1000000;
+		timevaladd(&sc->inputtimeout, &now);
+
+		/* native level: raw byte passthrough */
+		if (sc->mode.level == PSM_LEVEL_NATIVE) {
+			pb->ipacket[pb->inputbytes++] = c;
+			sc->syncerrors = 0;
+			sc->pkterrors = 0;
+			goto next;
+		}
+
+		if (pb->inputbytes >= sizeof(pb->ipacket))
+			pb->inputbytes = 0;
+
+		/* ALPS protocol handler */
+		switch (alps_process_byte(sc, c)) {
+		case PSMOUSE_GOOD_DATA:
+			continue;			/* waiting full packet */
+
+		case PSMOUSE_FULL_PACKET:
+			sc->syncerrors = 0;
+			sc->pkterrors = 0;
+			sc->cmdcount++;
+			goto next;			/* enqueue */
+
+		case PSMOUSE_BAD_DATA:
+			VLOG(3, (LOG_DEBUG,
+			    "psmintr_alps: out of sync (%02x)\n", c));
+			pb->inputbytes = 0;
+			sc->lasterr = sc->cmdcount;
+			sc->lastinputerr = now;
+			dropqueue(sc);
+			if (sc->syncerrors == 0)
+				sc->pkterrors++;
+			sc->syncerrors++;
+			if (sc->syncerrors >= priv->pktsize * 2 ||
+			    sc->pkterrors >= pkterrthresh) {
+				VLOG(3, (LOG_DEBUG,
+				    "psmintr_alps: reset the touchpad.\n"));
+				reinitialize(sc, TRUE);
+			} else if (sc->syncerrors == priv->pktsize) {
+				VLOG(3, (LOG_DEBUG,
+				    "psmintr_alps: re-enable.\n"));
+				disable_aux_dev(sc->kbdc);
+				enable_aux_dev(sc->kbdc);
+			}
+			continue;
+		}
+
+next:
+		if (++sc->pqueue_end >= PSM_PACKETQUEUE)
+			sc->pqueue_end = 0;
+		if ((sc->state & PSM_SOFTARMED) != 0) {
+			sc->state &= ~PSM_SOFTARMED;
+			callout_stop(&sc->softcallout);
+		}
+		psmsoftintr(sc);
+		continue;
+	}
+}
+
+static int
+proc_alps(struct psm_softc *sc, packetbuf_t *pb, mousestatus_t *ms,
+    int *x, int *y, int *z)
+{
+	struct alps_data *priv = &sc->alps_data;
+
+	priv->process_packet(sc, pb);
+	return (0);
 }
