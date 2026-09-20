@@ -8896,6 +8896,9 @@ static void alps_report_semi_mt_data(struct psm_softc *psmouse, int fingers)
 		fingers = f->pressure > 0 ? 1 : 0;
 		priv->second_touch = -1;
 	}
+	if (f->pressure < psmouse->syninfo.min_pressure ||
+	    f->pressure > psmouse->syninfo.max_pressure)
+		fingers = 0;
 
 	if (fingers >= 1)
 		alps_set_slot(dev, 0, f->mt[0].x, f->mt[0].y);
@@ -11641,6 +11644,64 @@ int alps_detect(struct psmouse *psmouse, bool set_properties)
  * end GPL-2 code
  */
 
+/*
+ * like elantech_init_synaptics()
+ */
+static void
+alps_init_synaptics(struct psm_softc *sc)
+{
+	struct alps_data *priv = &sc->alps_data;
+	/* Capabilities required by movement smoother */
+	sc->synhw.infoXupmm = priv->x_res ? priv->x_res : 50;
+	sc->synhw.infoYupmm = priv->y_res ? priv->y_res : 50;
+	sc->synhw.nExtendedQueries = 4;
+	sc->synhw.capExtended = 1;
+	sc->synhw.capMultiFinger = 1;
+	sc->synhw.capAdvancedGestures = 1;
+	sc->synhw.capPalmDetect = 0;
+	sc->synhw.capClickPad = !!(priv->flags & ALPS_BUTTONPAD);
+	sc->synhw.capReportsMax = 1;
+	sc->synhw.maximumXCoord = priv->x_max;
+	sc->synhw.maximumYCoord = priv->y_max;
+	sc->synhw.capReportsMin = 1;
+	sc->synhw.minimumXCoord = 0;
+	sc->synhw.minimumYCoord = 0;
+
+	if (sc->syninfo.sysctl_tree != NULL)
+		return;
+
+	synaptics_sysctl_create_tree(sc, "alps",
+	    (priv->flags & ALPS_DUALPOINT) ?
+		PS2_MOUSE_ALPS_DP_NAME : PS2_MOUSE_ALPS_NAME);
+
+	/* Reporting range = touchpad size */
+	sc->syninfo.max_x = priv->x_max;
+	sc->syninfo.max_y = priv->y_max;
+
+	sc->syninfo.min_pressure = 1;
+	sc->syninfo.max_pressure = 127;
+
+	/* Use full area, no noisy areas */
+	sc->syninfo.margin_top = 0;
+	sc->syninfo.margin_right = 0;
+	sc->syninfo.margin_bottom = 0;
+	sc->syninfo.margin_left = 0;
+	sc->syninfo.na_top = 0;
+	sc->syninfo.na_right = 0;
+	sc->syninfo.na_bottom = 0;
+	sc->syninfo.na_left = 0;
+
+	sc->syninfo.vscroll_hor_area = 0;
+	sc->syninfo.vscroll_ver_area = 0;
+
+	sc->syninfo.weight_len_squared = 700;
+	sc->syninfo.div_min = 4;
+	sc->syninfo.div_max = 8;
+	sc->syninfo.div_max_na = 25;
+	sc->syninfo.div_len = 75;
+	sc->syninfo.tap_max_delta = 30;
+}
+
 static int
 enable_alps(struct psm_softc *sc, enum probearg arg)
 {
@@ -11665,6 +11726,9 @@ enable_alps(struct psm_softc *sc, enum probearg arg)
 	error = priv->hw_init(sc);
 	if (error)
 		return (FALSE);
+
+	/* create synaptics sysctl three */
+	alps_init_synaptics(sc);
 
 	return (TRUE);
 }
