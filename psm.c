@@ -2956,6 +2956,8 @@ psmtimeout(void *arg)
 }
 
 /* Add all sysctls under the debug.psm and hw.psm nodes */
+#ifndef KLD_MODULE
+
 static SYSCTL_NODE(_debug, OID_AUTO, psm, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "ps/2 mouse");
 static SYSCTL_NODE(_hw, OID_AUTO, psm, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
@@ -3004,6 +3006,183 @@ SYSCTL_INT(_hw_psm, OID_AUTO, elantech_support, CTLFLAG_RDTUN,
 
 SYSCTL_INT(_hw_psm, OID_AUTO, mux_disabled, CTLFLAG_RDTUN,
     &mux_disabled, 0, "Disable active multiplexing");
+
+static inline int psm_sysctl_bind(void) { return (0); }
+static inline void psm_sysctl_unbind(void) { }
+
+#else
+
+static int psmhz = 20;
+static int psmerrsecs = 2;
+static int psmerrusecs = 0;
+static int psmsecs = 0;
+static int psmusecs = 500000;
+static int pkterrthresh = 2;
+static int tap_threshold = PSM_TAP_THRESHOLD;
+static int tap_timeout = PSM_TAP_TIMEOUT;
+
+struct psm_sysctl_bind {
+	const char		*name;
+	int			*var;
+	struct sysctl_oid	*oid;
+	void			*orig_arg1;
+};
+
+static struct psm_sysctl_bind psm_debug_binds[] = {
+	{ "loglevel",		&verbose },
+	{ "hz",			&psmhz },
+	{ "errsecs",		&psmerrsecs },
+	{ "errusecs",		&psmerrusecs },
+	{ "secs",		&psmsecs },
+	{ "usecs",		&psmusecs },
+	{ "pkterrthresh",	&pkterrthresh },
+};
+
+static struct psm_sysctl_bind psm_hw_binds[] = {
+	{ "tap_enabled",	&tap_enabled },
+	{ "tap_threshold",	&tap_threshold },
+	{ "tap_timeout",	&tap_timeout },
+	{ "synaptics_support",	&synaptics_support },
+	{ "trackpoint_support",	&trackpoint_support },
+	{ "elantech_support",	&elantech_support },
+	{ "mux_disabled",	&mux_disabled },
+};
+
+static struct sysctl_ctx_list psm_sysctl_ctx;
+static int psm_sysctl_bound;
+
+SYSCTL_DECL(_hw_psm);
+SYSCTL_DECL(_debug_psm);
+
+static struct sysctl_oid *
+psm_find_oid(struct sysctl_oid_list *children, const char *name)
+{
+	struct sysctl_oid *oid;
+
+	RB_FOREACH(oid, sysctl_oid_list, children) {
+		if (strcmp(oid->oid_name, name) == 0)
+			return (oid);
+	}
+	return (NULL);
+}
+
+static void
+psm_bind_table(struct sysctl_oid *node, struct psm_sysctl_bind *binds,
+    size_t nbinds)
+{
+	struct sysctl_oid *oid;
+	size_t i;
+
+	for (i = 0; i < nbinds; i++) {
+		oid = psm_find_oid(SYSCTL_CHILDREN(node), binds[i].name);
+		if (oid == NULL) {
+			VLOG(2, (LOG_WARNING, "psm: %s leaf not found, using default\n",
+			    binds[i].name));
+			continue;
+		}
+
+		if ((oid->oid_kind & CTLTYPE_INT) == 0 ||
+		    oid->oid_handler != sysctl_handle_int) {
+			VLOG(2, (LOG_WARNING, "psm: %s: unexpected type, not rebound\n",
+			    binds[i].name));
+			    continue;
+		}
+
+		*binds[i].var = *(int *)oid->oid_arg1;	/* get defaults */
+
+		binds[i].oid = oid;
+		binds[i].orig_arg1 = oid->oid_arg1;
+		oid->oid_arg1 = binds[i].var;		/* re-bind variables */
+	}
+}
+
+static int
+psm_sysctl_bind(void)
+{
+	struct sysctl_oid *debug_psm, *hw_psm;
+
+	if (psm_sysctl_bound)
+		return (0);
+
+	debug_psm = psm_find_oid(SYSCTL_CHILDREN(&sysctl___debug), "psm");
+	hw_psm = psm_find_oid(SYSCTL_CHILDREN(&sysctl___hw), "psm");
+	if (debug_psm == NULL || hw_psm == NULL)
+		return (ENOENT);
+
+	sysctl_ctx_init(&psm_sysctl_ctx);
+	psm_bind_table(debug_psm, psm_debug_binds, nitems(psm_debug_binds));
+	psm_bind_table(hw_psm, psm_hw_binds, nitems(psm_hw_binds));
+
+	/* get values for non-*TUN sysctls */
+	TUNABLE_INT_FETCH("debug.psm.hz", &psmhz);
+	TUNABLE_INT_FETCH("debug.psm.errsecs", &psmerrsecs);
+	TUNABLE_INT_FETCH("debug.psm.errusecs", &psmerrusecs);
+	TUNABLE_INT_FETCH("debug.psm.secs", &psmsecs);
+	TUNABLE_INT_FETCH("debug.psm.usecs", &psmusecs);
+	TUNABLE_INT_FETCH("debug.psm.pkterrthresh", &pkterrthresh);
+	TUNABLE_INT_FETCH("hw.psm.tap_threshold", &tap_threshold);
+	TUNABLE_INT_FETCH("hw.psm.tap_timeout", &tap_timeout);
+
+	psm_sysctl_bound = 1;
+	return (0);
+}
+
+
+static void
+psm_sysctl_unbind(void)
+{
+	size_t i;
+
+	if (!psm_sysctl_bound)
+		return;
+
+	for (i = 0; i < nitems(psm_debug_binds); i++) {
+		if (psm_debug_binds[i].oid != NULL) {
+			psm_debug_binds[i].oid->oid_arg1 =
+			    psm_debug_binds[i].orig_arg1;
+			psm_debug_binds[i].oid = NULL;
+		}
+	}
+
+	for (i = 0; i < nitems(psm_hw_binds); i++) {
+		if (psm_hw_binds[i].oid != NULL) {
+			psm_hw_binds[i].oid->oid_arg1 =
+			    psm_hw_binds[i].orig_arg1;
+			psm_hw_binds[i].oid = NULL;
+		}
+	}
+
+	if (sysctl_ctx_free(&psm_sysctl_ctx) != 0)
+		VLOG(2, (LOG_WARNING,
+		    "psm: sysctl_ctx_free failed, some OIDs may leak\n"));
+
+	psm_sysctl_bound = 0;
+}
+
+static int
+psm_mod_event(module_t mod, int type, void *arg)
+{
+	int error;
+
+	error = 0;
+	switch (type) {
+	case MOD_LOAD:
+		error = psm_sysctl_bind();
+		if (error != 0) {
+			VLOG(2, (LOG_ERR, "psm: sysctl bind failed (%d)\n",
+			    error));
+			error = 0;
+		}
+		break;
+	case MOD_UNLOAD:
+		psm_sysctl_unbind();
+		break;
+	default:
+		break;
+	}
+	return (error);
+}
+#endif
 
 static void
 psmintr(void *arg)
@@ -7527,7 +7706,7 @@ psmresume(device_t dev)
 	return (err);
 }
 
-DRIVER_MODULE(psm, atkbdc, psm_driver, 0, 0);
+DRIVER_MODULE(psm, atkbdc, psm_driver, psm_mod_event, NULL);
 #ifdef EVDEV_SUPPORT
 MODULE_DEPEND(psm, evdev, 1, 1, 1);
 #endif
