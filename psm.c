@@ -110,6 +110,26 @@
 /* drivers/input/mouse/alps.h */
 #include "alps.h"
 
+/* start GPL-2 code
+ * start code from drivers/input/mouse/alps.c
+ */
+#define ALPS_DUALPOINT		0x02	/* touchpad has trackstick */
+#define ALPS_PASS		0x04	/* device has a pass-through port */
+
+#define ALPS_WHEEL		0x08	/* hardware wheel present */
+#define ALPS_FW_BK_1		0x10	/* front & back buttons present */
+#define ALPS_FW_BK_2		0x20	/* front & back buttons present */
+#define ALPS_FOUR_BUTTONS	0x40	/* 4 direction button present */
+#define ALPS_PS2_INTERLEAVED	0x80	/* 3-byte PS/2 packet interleaved with
+					   6-byte ALPS packet */
+#define ALPS_STICK_BITS		0x100	/* separate stick button bits */
+#define ALPS_BUTTONPAD		0x200	/* device is a clickpad */
+#define ALPS_DUALPOINT_WITH_PRESSURE	0x400	/* device can report trackpoint pressure */
+/*
+ * end code from drivers/input/mouse/alps.c
+ * end GPL-2 code
+ */
+
 /*
  * Driver specific options: the following options may be set by
  * `options' statements in the kernel configuration file.
@@ -7896,6 +7916,34 @@ ISA_PNP_INFO(psmcpnp_ids);
  * start GPL-2 code
  */
 
+/*
+ * start code from include/linux/input/mt.h
+ * Copyright (c) 2010 Henrik Rydberg
+ */
+#define INPUT_MT_POINTER	0x0001
+#define INPUT_MT_DIRECT	0x0002
+#define INPUT_MT_DROP_UNUSED	0x0004
+#define INPUT_MT_TRACK		0x0008
+#define INPUT_MT_SEMI_MT	0x0010
+/* end code from include/linux/input/mt.h */
+
+/* start code from drivers/input/mouse/psmouse.h */
+#define PSMOUSE_CMD_SETSCALE11	0x00e6
+#define PSMOUSE_CMD_SETSCALE21	0x00e7
+#define PSMOUSE_CMD_SETRES	0x10e8
+#define PSMOUSE_CMD_GETINFO	0x03e9
+#define PSMOUSE_CMD_SETSTREAM	0x00ea
+#define PSMOUSE_CMD_SETPOLL	0x00f0
+#define PSMOUSE_CMD_POLL	0x00eb	/* caller sets number of bytes to receive */
+#define PSMOUSE_CMD_RESET_WRAP	0x00ec
+#define PSMOUSE_CMD_GETID	0x02f2
+#define PSMOUSE_CMD_SETRATE	0x10f3
+#define PSMOUSE_CMD_ENABLE	0x00f4
+#define PSMOUSE_CMD_DISABLE	0x00f5
+#define PSMOUSE_CMD_RESET_DIS	0x00f6
+#define PSMOUSE_CMD_RESET_BAT	0x02ff
+/* end code from drivers/input/mouse/psmouse.h */
+
 /* start code from drivers/input/mouse/alps.c */
 #if 0
 
@@ -7990,20 +8038,6 @@ static const struct alps_nibble_commands alps_v6_nibble_commands[] = {
 	{ PSMOUSE_CMD_SETSCALE21,	0x00 }, /* e */
 	{ PSMOUSE_CMD_SETSCALE11,	0x00 }, /* f */
 };
-
-
-#define ALPS_DUALPOINT		0x02	/* touchpad has trackstick */
-#define ALPS_PASS		0x04	/* device has a pass-through port */
-
-#define ALPS_WHEEL		0x08	/* hardware wheel present */
-#define ALPS_FW_BK_1		0x10	/* front & back buttons present */
-#define ALPS_FW_BK_2		0x20	/* front & back buttons present */
-#define ALPS_FOUR_BUTTONS	0x40	/* 4 direction button present */
-#define ALPS_PS2_INTERLEAVED	0x80	/* 3-byte PS/2 packet interleaved with
-					   6-byte ALPS packet */
-#define ALPS_STICK_BITS		0x100	/* separate stick button bits */
-#define ALPS_BUTTONPAD		0x200	/* device is a clickpad */
-#define ALPS_DUALPOINT_WITH_PRESSURE	0x400	/* device can report trackpoint pressure */
 
 static const struct alps_model_info alps_model_data[] = {
 	/*
